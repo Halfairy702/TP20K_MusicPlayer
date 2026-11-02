@@ -1,0 +1,36 @@
+//=============================================================================
+// top.cst - Tang Primer 20K (GW2A-LV18PG256C8/I7) + Dock
+// Pin assignments verified against the Dock/SOM schematic.
+//=============================================================================
+
+// ---- 27 MHz system clock (SOM U10 oscillator, GCLK capable) ----
+IO_LOC  "clk" H11;
+IO_PORT "clk" IO_TYPE=LVCMOS33;
+
+// ---- S1 : reset (shared with FPGA_RST supervisor, needs use_sspi_as_gpio) ----
+IO_LOC  "rst_n" T10;
+IO_PORT "rst_n" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// ---- S2 / S3 : next song / play-pause   (bank 4 is 1.5 V) ----
+IO_LOC  "key_next" T3;
+IO_PORT "key_next" IO_TYPE=LVCMOS15 PULL_MODE=UP;
+
+IO_LOC  "key_play" T2;
+IO_PORT "key_play" IO_TYPE=LVCMOS15 PULL_MODE=UP;
+
+// ---- On-board PT8211 I2S DAC -> LPA4809 amp -> 3.5 mm jack J10 ----
+IO_LOC  "hp_bck" N15;
+IO_PORT "hp_bck" IO_TYPE=LVCMOS33 DRIVE=8;
+
+IO_LOC  "hp_ws" P16;
+IO_PORT "hp_ws" IO_TYPE=LVCMOS33 DRIVE=8;
+
+IO_LOC  "hp_din" P15;
+IO_PORT "hp_din" IO_TYPE=LVCMOS33 DRIVE=8;
+
+IO_LOC  "pa_en" R16;
+IO_PORT "pa_en" IO_TYPE=LVCMOS33 DRIVE=8;
+
+// ---- Status LED (LED4, active LOW) ----
+IO_LOC  "led" L14;
+IO_PORT "led" IO_TYPE=LVCMOS33;

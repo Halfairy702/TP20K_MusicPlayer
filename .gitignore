@@ -1,0 +1,23 @@
+# Gowin 编译产物
+impl/
+*.fs
+*.bin
+*.binx
+*.vg
+*.db
+*.rpt
+*.html
+*.log
+
+# Gowin 工程用户配置（含本机绝对路径）
+*.gprj.user
+
+# 仿真生成的音频
+sim/*.wav
+
+# 系统 / 编辑器
+Thumbs.db
+desktop.ini
+.vscode/
+__pycache__/
+*.pyc
