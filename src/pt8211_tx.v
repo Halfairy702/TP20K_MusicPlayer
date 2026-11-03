@@ -13,10 +13,11 @@
 //       WS   = BCK / 32         -> frame rate 46.875 kHz
 //
 //   Frame layout (32 BCK per frame, 16 bits per channel):
-//       bit  0..15 : left  channel, MSB first (din changes on BCK falling edge)
-//       bit 16..31 : right channel, MSB first
-//       WS is low for left, high for right, edges at bit 3 / bit 19
-//       (that offset matches the vendor demo that is proven on this board).
+//       din changes on the BCK rising edge
+//       left  word : MSB on the wire at bit_cnt 3, LSB at 18
+//       right word : MSB on the wire at bit_cnt 19, LSB at 2 of the next frame
+//       WS is low while the left word is on the wire, high for the right one
+//       (matches the vendor demo that is proven on this board).
 //=============================================================================
 `default_nettype none
 
@@ -79,12 +80,13 @@ module pt8211_tx #(
             if (bit_edge) begin
                 bit_cnt <= bit_cnt + 5'd1;
 
-                // Load a channel word on its first bit, shift out MSB first.
-                if (bit_cnt == 5'd0) begin
+                // Load a channel word so that its MSB lands on the wire at the
+                // same BCK edge where WS changes (PT8211 latches from there).
+                if (bit_cnt == 5'd3) begin
                     din   <= sample_l[15];
                     shreg <= {sample_l[14:0], 1'b0};
                 end
-                else if (bit_cnt == 5'd16) begin
+                else if (bit_cnt == 5'd19) begin
                     din   <= sample_r[15];
                     shreg <= {sample_r[14:0], 1'b0};
                 end
