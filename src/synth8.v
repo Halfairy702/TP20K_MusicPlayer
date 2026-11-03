@@ -1,20 +1,30 @@
-// synth8.v - 8-voice polyphonic wavetable engine with a chord sequencer.
+// synth8.v - 8-voice polyphonic wavetable engine, two control modes.
 //
-// Stage 1 of the competition instrument: proves polyphony, per-voice ADSR and
-// multi-timbral output before the real touch/pressure front end exists.
-// The sequencer plays a four-chord progression, each chord on a different
-// wavetable bank, so the polyphony and the timbre switch are both audible.
+//   demo_en = 0 : four-key instrument. S2..S5 drive four voices directly, so
+//                 chords are just multiple keys held down. SW3/SW4 pick the
+//                 wavetable, SW5 transposes an octave.
+//   demo_en = 1 : automatic four-chord progression, one wavetable per chord,
+//                 used as a self-test and for the video recording.
 `default_nettype none
 
 module synth8 (
     input  wire        clk,
     input  wire        rst_n,
     input  wire        sample_tick,
-    input  wire        next_chord,      // 1-clk pulse, jump to next chord
+
+    input  wire        next_chord,      // 1-clk pulse
     input  wire        pause_toggle,    // 1-clk pulse
+
+    input  wire [3:0]  key_press,       // 1-clk pulses, one per key
+    input  wire [3:0]  key_release,     // 1-clk pulses
+    input  wire [1:0]  timbre,          // manual mode wavetable select
+    input  wire        octave_up,       // manual mode +1 octave
+    input  wire        demo_en,         // 1 = chord sequencer, 0 = keys
+
     output wire [15:0] sample_l,
     output wire [15:0] sample_r,
     output wire        playing,
+    output wire        any_active,      // at least one envelope is running
     output reg  [1:0]  chord_idx
 );
 
@@ -22,51 +32,35 @@ module synth8 (
     localparam [5:0]  REST         = 6'd63;
 
     //-------------------------------------------------------------------------
-    // Chord table
+    // Demo chord table
     //-------------------------------------------------------------------------
     function [5:0] note_of;
         input [1:0] c;
         input [3:0] v;
         begin
             case (c)
-                // C major
-                2'd0: case (v)
-                    4'd0: note_of = 6'd12;   // C4
-                    4'd1: note_of = 6'd16;   // E4
-                    4'd2: note_of = 6'd19;   // G4
-                    4'd3: note_of = 6'd24;   // C5
-                    4'd4: note_of = 6'd28;   // E5
-                    4'd5: note_of = 6'd31;   // G5
+                2'd0: case (v)                    // C major
+                    4'd0: note_of = 6'd12;   4'd1: note_of = 6'd16;
+                    4'd2: note_of = 6'd19;   4'd3: note_of = 6'd24;
+                    4'd4: note_of = 6'd28;   4'd5: note_of = 6'd31;
                     default: note_of = REST;
                 endcase
-                // A minor
-                2'd1: case (v)
-                    4'd0: note_of = 6'd9;    // A3
-                    4'd1: note_of = 6'd12;   // C4
-                    4'd2: note_of = 6'd16;   // E4
-                    4'd3: note_of = 6'd21;   // A4
-                    4'd4: note_of = 6'd24;   // C5
-                    4'd5: note_of = 6'd28;   // E5
+                2'd1: case (v)                    // A minor
+                    4'd0: note_of = 6'd9;    4'd1: note_of = 6'd12;
+                    4'd2: note_of = 6'd16;   4'd3: note_of = 6'd21;
+                    4'd4: note_of = 6'd24;   4'd5: note_of = 6'd28;
                     default: note_of = REST;
                 endcase
-                // F major
-                2'd2: case (v)
-                    4'd0: note_of = 6'd5;    // F3
-                    4'd1: note_of = 6'd9;    // A3
-                    4'd2: note_of = 6'd12;   // C4
-                    4'd3: note_of = 6'd17;   // F4
-                    4'd4: note_of = 6'd21;   // A4
-                    4'd5: note_of = 6'd24;   // C5
+                2'd2: case (v)                    // F major
+                    4'd0: note_of = 6'd5;    4'd1: note_of = 6'd9;
+                    4'd2: note_of = 6'd12;   4'd3: note_of = 6'd17;
+                    4'd4: note_of = 6'd21;   4'd5: note_of = 6'd24;
                     default: note_of = REST;
                 endcase
-                // G major
-                default: case (v)
-                    4'd0: note_of = 6'd7;    // G3
-                    4'd1: note_of = 6'd11;   // B3
-                    4'd2: note_of = 6'd14;   // D4
-                    4'd3: note_of = 6'd19;   // G4
-                    4'd4: note_of = 6'd23;   // B4
-                    4'd5: note_of = 6'd26;   // D5
+                default: case (v)                 // G major
+                    4'd0: note_of = 6'd7;    4'd1: note_of = 6'd11;
+                    4'd2: note_of = 6'd14;   4'd3: note_of = 6'd19;
+                    4'd4: note_of = 6'd23;   4'd5: note_of = 6'd26;
                     default: note_of = REST;
                 endcase
             endcase
@@ -77,16 +71,16 @@ module synth8 (
         input [1:0] c;
         begin
             case (c)
-                2'd0:    bank_of = 2'd1;        // guzheng
-                2'd1:    bank_of = 2'd2;        // pipa
-                2'd2:    bank_of = 2'd3;        // organ
+                2'd0:    bank_of = 2'd1;
+                2'd1:    bank_of = 2'd2;
+                2'd2:    bank_of = 2'd3;
                 default: bank_of = 2'd1;
             endcase
         end
     endfunction
 
     //-------------------------------------------------------------------------
-    // Sequencer: one chord change per CHORD_PERIOD samples
+    // Demo sequencer
     //-------------------------------------------------------------------------
     reg [15:0] period_cnt;
     reg        go;
@@ -98,7 +92,7 @@ module synth8 (
         end
         else begin
             go <= 1'b0;
-            if (sample_tick) begin
+            if (sample_tick && demo_en) begin
                 if (period_cnt >= CHORD_PERIOD - 16'd1) begin
                     period_cnt <= 16'd0;
                     go         <= 1'b1;
@@ -107,7 +101,7 @@ module synth8 (
                     period_cnt <= period_cnt + 16'd1;
                 end
             end
-            if (next_chord) begin
+            if (next_chord && demo_en) begin
                 period_cnt <= 16'd0;
                 go         <= 1'b1;
             end
@@ -120,8 +114,7 @@ module synth8 (
     end
 
     //-------------------------------------------------------------------------
-    // Increment mailbox: eight lookups spread over eight clocks, so the
-    // note-to-increment ROM only needs one instance.
+    // Demo increment mailbox: eight lookups spread over eight clocks
     //-------------------------------------------------------------------------
     reg [23:0] inc_q [0:7];
     reg [7:0]  mask_q;
@@ -169,22 +162,75 @@ module synth8 (
     end
 
     //-------------------------------------------------------------------------
+    // Manual keyboard: S2..S5 -> C4 E4 G4 C5, optional +1 octave
+    //-------------------------------------------------------------------------
+    wire [5:0] k_note0 = octave_up ? 6'd24 : 6'd12;
+    wire [5:0] k_note1 = octave_up ? 6'd28 : 6'd16;
+    wire [5:0] k_note2 = octave_up ? 6'd31 : 6'd19;
+    wire [5:0] k_note3 = octave_up ? 6'd36 : 6'd24;
+
+    wire [23:0] k_inc [0:3];
+
+    note_inc u_k0 (.note (k_note0), .inc (k_inc[0]));
+    note_inc u_k1 (.note (k_note1), .inc (k_inc[1]));
+    note_inc u_k2 (.note (k_note2), .inc (k_inc[2]));
+    note_inc u_k3 (.note (k_note3), .inc (k_inc[3]));
+
+    //-------------------------------------------------------------------------
+    // Per-voice control mux
+    //-------------------------------------------------------------------------
+    reg demo_d;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) demo_d <= 1'b0;
+        else        demo_d <= demo_en;
+    end
+    wire mode_chg = demo_en ^ demo_d;
+
+    wire [23:0] vinc  [0:7];
+    wire [7:0]  vtrig;
+    wire [7:0]  voff;
+
+    genvar g;
+    generate
+        for (g = 0; g < 8; g = g + 1) begin : CTRL
+            if (g < 4) begin : KEYED
+                assign vinc[g]   = demo_en ? inc_q[g] : k_inc[g];
+                assign vtrig[g]  = demo_en ? (fire & mask_q[g]) : key_press[g];
+                // mode_chg releases the demo voices left over from the previous
+                // mode, but must not cancel the key press that caused it.
+                assign voff[g]   = demo_en ? (fire & ~mask_q[g])
+                                           : (key_release[g] |
+                                              (mode_chg & ~key_press[g]));
+            end
+            else begin : SPARE
+                assign vinc[g]   = demo_en ? inc_q[g] : 24'd0;
+                assign vtrig[g]  = demo_en ? (fire & mask_q[g]) : 1'b0;
+                assign voff[g]   = demo_en ? (fire & ~mask_q[g]) : mode_chg;
+            end
+        end
+    endgenerate
+
+    wire [1:0] vbank = demo_en ? bank_of(chord_idx) : timbre;
+
+    //-------------------------------------------------------------------------
     // Eight voices
     //-------------------------------------------------------------------------
     wire signed [15:0] vout [0:7];
-    wire [1:0] bank = bank_of(chord_idx);
+    wire [7:0]         vbusy;
 
-    genvar g;
+    assign any_active = |vbusy;
+
     generate
         for (g = 0; g < 8; g = g + 1) begin : VOICES
             voice u_voice (
                 .clk         (clk),
                 .rst_n       (rst_n),
                 .sample_tick (sample_tick),
-                .inc         (inc_q[g]),
-                .bank        (bank),
-                .trigger     (fire & mask_q[g]),
-                .note_off    (fire & ~mask_q[g]),
+                .inc         (vinc[g]),
+                .bank        (vbank),
+                .trigger     (vtrig[g]),
+                .note_off    (voff[g]),
+                .busy        (vbusy[g]),
                 .out         (vout[g])
             );
         end
@@ -195,7 +241,7 @@ module synth8 (
     //-------------------------------------------------------------------------
     reg        playing_r;
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)         playing_r <= 1'b1;
+        if (!rst_n)            playing_r <= 1'b1;
         else if (pause_toggle) playing_r <= ~playing_r;
     end
 
@@ -204,8 +250,6 @@ module synth8 (
     reg signed [20:0] mix;
     integer k;
 
-    // Headroom check: 8 voices x 16384 peak >> 2 = 32768, so the sum can just
-    // reach full scale and the saturator below covers the overshoot.
     always @(*) begin
         mix = 21'sd0;
         for (k = 0; k < 8; k = k + 1)

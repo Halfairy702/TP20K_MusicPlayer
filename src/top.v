@@ -1,17 +1,18 @@
 //=============================================================================
-// top.v  -  Tang Primer 20K polyphonic synthesizer (stage 1)
+// top.v  -  Tang Primer 20K polyphonic synthesizer
 //
 //   Board : Sipeed Tang Primer 20K  (GW2A-LV18PG256C8/I7) + Dock
 //   Clock : 27 MHz  (pin H11)
 //
-//   Engine : synth8 - eight parallel wavetable voices, per-voice ADSR,
-//            four-chord progression, one wavetable bank per chord.
+//   Engine : synth8 - eight parallel wavetable voices, per-voice ADSR.
 //
 //   Controls
-//     S1 (T10) : reset          (active low)
-//     S2 (T3)  : next chord     (active low, 1.5 V bank)
-//     S3 (T2)  : play / pause   (active low, 1.5 V bank)
-//     LED4 (L14): blinks while playing, steady on when paused
+//     S0 (T10) : reset                  (active low)
+//     S1..S4   : play notes             (C4 / E4 / G4 / C5, active low)
+//     LED4 (L14): slow blink while playing
+//
+//   This Dock revision has no DIP switch bank, so the timbre is fixed to the
+//   sine table and the eight-voice chord sequencer is disabled.
 //
 //   Audio path
 //     27 MHz -> pt8211_tx  BCK 1.5 MHz, frame rate 46.875 kHz
@@ -22,8 +23,8 @@
 module top (
     input  wire       clk,          // 27 MHz  (H11)
     input  wire       rst_n,        // S1      (T10, active low)
-    input  wire       key_next,     // S2      (T3,  active low)
-    input  wire       key_play,     // S3      (T2,  active low)
+
+    input  wire [3:0] key_in,       // S2..S5  (active low, 1.5 V bank)
 
     output wire       hp_bck,       // N15
     output wire       hp_ws,        // P16
@@ -32,15 +33,22 @@ module top (
     output wire       led           // L14  (active low on this board)
 );
 
+    // This Dock has no DIP switch bank: the pins that would read it float, so
+    // the timbre was being picked at random and often landed on a harsh table.
+    // Fixed to the sine bank, the cleanest of the four.
+    wire       demo_en   = 1'b0;
+    wire [1:0] timbre    = 2'b00;
+    wire       octave_up = 1'b0;
+
     //-------------------------------------------------------------------------
-    // PT8211 transmitter: generates BCK/WS/DIN and one tick per audio frame.
+    // PT8211 transmitter
     //-------------------------------------------------------------------------
     wire        sample_tick;
     wire [15:0] sample_l;
     wire [15:0] sample_r;
 
     pt8211_tx #(
-        .CLK_DIV(18)                    // BCK = 27 MHz / 18 = 1.5 MHz
+        .CLK_DIV(18)
     ) u_pt8211 (
         .clk         (clk),
         .rst_n       (rst_n),
@@ -52,51 +60,75 @@ module top (
         .sample_tick (sample_tick)
     );
 
-    // PA_EN is driven from `playing` further down, once the engine exists.
-
     //-------------------------------------------------------------------------
-    // Button debounce (10 ms) + single-cycle press pulses
+    // Key debounce (10 ms) -> press / release pulses
     //-------------------------------------------------------------------------
     localparam integer DEB_MAX = 270_000;       // 27 MHz * 10 ms
 
-    reg [19:0] deb_cnt_n, deb_cnt_p;
-    reg        key_n_s, key_p_s;
-    reg        press_next, press_play;
+    // One key input on this board idles low, which would otherwise look like a
+    // permanently held key. Sample the pins shortly after configuration and
+    // treat anything already low as released.
+    reg [3:0]  stuck;
+    reg [21:0] boot_cnt;
+    localparam [21:0] BOOT_MAX = 22'd800_000;   // ~30 ms after configuration
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            deb_cnt_n <= 20'd0;
-            deb_cnt_p <= 20'd0;
-            key_n_s   <= 1'b1;      // idle high
-            key_p_s   <= 1'b1;
-            press_next <= 1'b0;
-            press_play <= 1'b0;
+            boot_cnt <= 22'd0;
+            stuck    <= 4'd0;
+        end
+        else if (boot_cnt != BOOT_MAX) begin
+            boot_cnt <= boot_cnt + 22'd1;
+            if (boot_cnt == BOOT_MAX - 22'd1) stuck <= ~key_in;
+        end
+    end
+
+    wire [3:0] key_eff = key_in | stuck;
+    wire       boot_done = (boot_cnt == BOOT_MAX);
+
+    reg [19:0] deb_cnt [0:3];
+    reg        key_s   [0:3];
+    reg [3:0]  press, rel;
+    reg [3:0]  held;
+
+    integer i;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (i = 0; i < 4; i = i + 1) begin
+                deb_cnt[i] <= 20'd0;
+                key_s[i]   <= 1'b1;         // idle high
+            end
+            press <= 4'd0;
+            rel   <= 4'd0;
+            held  <= 4'd0;
         end
         else begin
-            press_next <= 1'b0;
-            press_play <= 1'b0;
+            press <= 4'd0;
+            rel   <= 4'd0;
 
-            // ---- S2 : next chord ----
-            if (key_next != key_n_s) begin
-                if (deb_cnt_n == DEB_MAX) begin
-                    key_n_s    <= key_next;
-                    deb_cnt_n  <= 20'd0;
-                    if (key_next == 1'b0) press_next <= 1'b1;
+            if (!boot_done) begin
+                for (i = 0; i < 4; i = i + 1) begin
+                    key_s[i]   <= key_eff[i];
+                    deb_cnt[i] <= 20'd0;
                 end
-                else deb_cnt_n <= deb_cnt_n + 20'd1;
             end
-            else deb_cnt_n <= 20'd0;
+            else begin
+                for (i = 0; i < 4; i = i + 1) begin
+                    if (key_eff[i] != key_s[i]) begin
+                        if (deb_cnt[i] == DEB_MAX) begin
+                            key_s[i]   <= key_eff[i];
+                            deb_cnt[i] <= 20'd0;
+                            if (key_eff[i] == 1'b0) press[i] <= 1'b1;
+                            else                    rel[i]   <= 1'b1;
+                        end
+                        else deb_cnt[i] <= deb_cnt[i] + 20'd1;
+                    end
+                    else deb_cnt[i] <= 20'd0;
+                end
+            end
 
-            // ---- S3 : play / pause ----
-            if (key_play != key_p_s) begin
-                if (deb_cnt_p == DEB_MAX) begin
-                    key_p_s    <= key_play;
-                    deb_cnt_p  <= 20'd0;
-                    if (key_play == 1'b0) press_play <= 1'b1;
-                end
-                else deb_cnt_p <= deb_cnt_p + 20'd1;
-            end
-            else deb_cnt_p <= 20'd0;
+            held <= {~key_s[3], ~key_s[2], ~key_s[1], ~key_s[0]};
         end
     end
 
@@ -104,25 +136,40 @@ module top (
     // Synthesiser
     //-------------------------------------------------------------------------
     wire playing;
+    wire any_active;
 
     synth8 u_synth (
         .clk          (clk),
         .rst_n        (rst_n),
         .sample_tick  (sample_tick),
-        .next_chord   (press_next),
-        .pause_toggle (press_play),
+        .next_chord   (demo_en ? press[0] : 1'b0),
+        .pause_toggle (demo_en ? press[1] : 1'b0),
+        .key_press    (press),
+        .key_release  (rel),
+        .timbre       (timbre),
+        .octave_up    (octave_up),
+        .demo_en      (demo_en),
         .sample_l     (sample_l),
         .sample_r     (sample_r),
         .playing      (playing),
+        .any_active   (any_active),
         .chord_idx    ()
     );
 
-    // The amp is the dominant noise source on this board, so mute it while the
-    // engine is paused instead of leaving it amplifying its own noise floor.
-    assign pa_en = playing;
+    // The amp is the dominant noise source on this board: keep it enabled only
+    // while an envelope is running, plus a ~40 ms hold-off so note gaps and the
+    // amp's own enable delay cannot chop the attack.
+    reg [19:0] pa_hold;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)                pa_hold <= 20'd0;
+        else if (any_active)       pa_hold <= 20'hFFFFF;
+        else if (pa_hold != 20'd0) pa_hold <= pa_hold - 20'd1;
+    end
+
+    assign pa_en = any_active | (pa_hold != 20'd0);
 
     //-------------------------------------------------------------------------
-    // Status LED: slow blink while playing, steady ON (low) when paused
+    // Status LED: slow blink while playing, steady on when paused
     //-------------------------------------------------------------------------
     reg [23:0] blink_cnt;
     always @(posedge clk or negedge rst_n) begin
@@ -130,7 +177,9 @@ module top (
         else        blink_cnt <= blink_cnt + 24'd1;
     end
 
-    assign led = playing ? blink_cnt[23] : 1'b0;
+    // LED4 is active low: lit steady while a key is held, slow blink while the
+    // demo plays, steady on when paused.
+    assign led = (|held) ? 1'b0 : (playing ? blink_cnt[23] : 1'b0);
 
 endmodule
 

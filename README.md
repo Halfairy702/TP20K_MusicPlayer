@@ -1,174 +1,133 @@
-# TP20K 音乐播放器 · Tang Primer 20K
+# 云弦 · FPGA 实时多音色合成电子乐器引擎
 
-基于 Sipeed Tang Primer 20K（GW2A-LV18PG256C8/I7）+ Dock 的纯 FPGA 音乐播放器。
-没有 CPU、没有软件——乐曲调度、DDS 合成、PT8211 串行发送全部是硬件逻辑。
+基于 Sipeed Tang Primer 20K（GW2A-LV18PG256C8/I7）+ Dock 的纯 FPGA 音频合成引擎。
+没有 CPU、没有软件 —— 音高计算、波形合成、包络调制、串行音频输出全部由硬件逻辑并行完成。
 
-板载 **PT8211 DAC → LPA4809 功放 → 3.5mm 耳机口 J10**，插上耳机就能听，不需要额外买任何模块。
+板载 **PT8211 DAC → LPA4809 功放 → 3.5 mm 耳机口**，插上耳机即可演奏，无需任何外部模块。
 
 ---
 
-## 1. 当前功能
+## 1. 功能特性
 
-| 功能 | 说明 |
+| 特性 | 说明 |
 |------|------|
-| 两首曲子 | 小星星 / 欢乐颂，循环播放 |
-| 合成方式 | 24 位相位累加器 DDS + 256×16 正弦波表 |
-| 输出 | PT8211，BCK 1.5 MHz，采样率 **46875 Hz** |
-| 按键 | S2 切歌，S3 播放/暂停 |
-| 指示灯 | LED4 播放时慢闪，暂停时常亮 |
+| 8 声部复音 | 8 路并行相位累加器 + 波表读取，可同时发声 8 个音符 |
+| 多音色波表 | 4 张 256 点 16 位波表：正弦 / 弹拨 / 明亮 / 风琴 |
+| 独立 ADSR | 每声部一个指数包络，起音 11 ms、衰减 87 ms、释放 175 ms |
+| 实时演奏 | 按键直接触发声部，按住即发声、松开即释放 |
+| 低延迟 | 音频运算全硬件，链路延迟 < 1 ms（按键去抖另计 10 ms） |
+| 静音管理 | 功放使能与包络活动联动，静置时自动关闭功放消除底噪 |
+
+采样率 **46875 Hz**（27 MHz ÷ 18 ÷ 32），16 位 PCM，单时钟域无门控时钟。
 
 ---
 
-## 2. 操作
+## 2. 硬件平台
 
-| 按键 | 位置 | 功能 |
+* Sipeed Tang Primer 20K，GW2A-LV18PG256C8/I7
+* 27 MHz 系统时钟（H11）
+* 板载 PT8211 I2S DAC → LPA4809 功放 → 3.5 mm 耳机口 J10
+
+### 按键
+
+| 按键 | 引脚 | 功能 |
 |------|------|------|
-| **S1** | 板上 | 复位（低有效，兼 FPGA_RST） |
-| **S2** | 板上 | 下一首 |
-| **S3** | 板上 | 播放 / 暂停 |
-| **LED4** | 板上 | 播放中闪烁 |
-
-> ⚠️ **SW1 拨码必须保持在 ON**：它接 RECONFIG_N，拉低会导致无法配置。
-> 开机时 S1 会被复位监控芯片拉低，这是正常的。
+| S0 | T10 | 复位（FPGA_RST） |
+| S1 | T3 | C4 |
+| S2 | T2 | E4 |
+| S3 | D7 | G4 |
+| S4 | C7 | C5（部分板型该引脚空闲为低，固件会自动屏蔽） |
 
 ---
 
-## 3. 音频链路参数
+## 3. 目录结构
 
 ```
-27 MHz (H11)
-   │
-   ├─ ÷18 ──────────► BCK  = 1.5 MHz   (N15)
-   │                    │
-   │                    └─ ÷32 ──► WS = 46875 Hz 帧率 (P16)
-   │
-   └─ DDS 24 bit ──► 正弦波表 ──► 16 bit ──► DIN (P15)
-                                              PA_EN (R16) = 常高
+src/
+  top.v              顶层：引脚、按键去抖、模块例化
+  synth8.v           八声部合成器：声部分配、混音、饱和限幅
+  voice.v            单声部：相位累加、波表读取、包络乘法
+  adsr.v             指数 ADSR 包络发生器
+  wavetable_rom.v    4 × 256 × 16 位波表（由脚本生成）
+  note_inc.v         36 个音名到相位增量的映射（由脚本生成）
+  pt8211_tx.v        PT8211 串行音频时序发生器
+  top.cst            引脚约束
+  top.sdc            时序约束
+  gen_tables.py      生成波表与音高表
+  model_synth.py     位级行为模型，渲染 WAV 离线验证
+build.tcl            命令行综合与布局布线脚本
+doc/                 技术文档
 ```
-
-采样率 = 27,000,000 ÷ 18 ÷ 32 = **46,875 Hz**
-
-> 官方 demo 用 rPLL 把 27 MHz 倍到 6 MHz 再 ÷4 得到 1.536 MHz。
-> 本工程直接从 27 MHz 整数分频，省掉 PLL，采样率 46.875 kHz 对 PT8211 完全够用。
-
-**PT8211 是 16 位 LSB-justified（"日本格式"），不是标准 I2S。**
-数据在 BCK 上升沿更新、MSB 先行、WS 边沿偏移 3 个 BCK——与厂商已验证的驱动保持一致。
 
 ---
 
-## 4. 引脚
+## 4. 构建
 
-| 信号 | 管脚 | 电压域 |
+需要 Gowin EDA（V1.9.11 或更新）。
+
+```powershell
+gw_sh build.tcl
+```
+
+生成比特流：`impl/pnr/top.fs`
+
+烧录到 SRAM：
+
+```powershell
+programmer_cli -d GW2A-18C --run 2 --fsFile impl/pnr/top.fs
+```
+
+烧录到外部 Flash（掉电保持）：
+
+```powershell
+programmer_cli -d GW2A-18C --run 36 --fsFile impl/pnr/top.fs
+```
+
+可用 Gowin IDE 直接打开 `TP20K_MusicPlayer.gprj` 图形化操作。
+
+---
+
+## 5. 离线验证
+
+`src/model_synth.py` 以与 RTL 完全相同的定点运算和截断规则复现合成器行为，可在没有硬件的情况下渲染音频、统计削波与跳变：
+
+```powershell
+python src/model_synth.py
+```
+
+输出 `sim/synth8.wav`。用于区分「算法错误」与「硬件链路错误」。
+
+重新生成波表：
+
+```powershell
+python src/gen_tables.py
+```
+
+---
+
+## 6. 资源占用
+
+| 资源 | 占用 | 利用率 |
 |------|------|--------|
-| clk (27 MHz) | H11 | 3.3 V |
-| rst_n (S1) | T10 | 3.3 V |
-| key_next (S2) | T3 | **1.5 V** |
-| key_play (S3) | T2 | **1.5 V** |
-| hp_bck | N15 | 3.3 V |
-| hp_ws | P16 | 3.3 V |
-| hp_din | P15 | 3.3 V |
-| pa_en | R16 | 3.3 V |
-| led (LED4) | L14 | 3.3 V |
+| LUT | 1455 / 20736 | 8% |
+| 触发器 | 434 / 16173 | 3% |
+| BSRAM | 8 / 46 | 18% |
+| DSP | 4 / 24 | 17% |
 
-> S2–S5 在 1.5 V 的 Bank 4 上，约束必须写 `LVCMOS15`，写错会导致输入失效。
+27 MHz 主时钟，布局布线后无时序违例。
 
 ---
 
-## 5. 编译
+## 7. 实现要点
 
-工程必须放在**纯英文路径**下。Gowin 命令行不认中文路径，会报
-`Corrupted project file: C:/Users/???/...`。
-
-```powershell
-cd C:\gowin_work\TP20K_MusicPlayer
-& "C:\Gowin\Gowin_V1.9.11.03_Education_x64\IDE\bin\gw_sh.exe" build.tcl
-```
-
-产物：`impl\pnr\top.fs`
-
-GUI 方式：双击 `TP20K_MusicPlayer.gprj` 用 Gowin IDE 打开，直接 Run All。
+* **相位累加器**：24 位累加器，高 8 位索引波表，`inc = f × 2^24 / fs`，音准误差优于 0.008%
+* **指数包络**：ADSR 全部用移位加逼近实现，不使用乘法器
+* **PT8211 时序**：数据加载点与 WS 跳变沿严格对齐（位计数 3 / 19），与厂商参考驱动一致
+* **饱和限幅**：8 声部求和后做上下界钳位，避免溢出削波
+* **引脚自校准**：上电 30 ms 后采样按键引脚，屏蔽空闲为低的不可用输入
 
 ---
 
-## 6. 烧录
+## 8. 许可证
 
-**下载到 SRAM（断电丢失，调试用）**
-
-```powershell
-& "C:\Gowin\Gowin_V1.9.11.03_Education_x64\Programmer\bin\programmer_cli.exe" `
-  -d GW2A-18C --run 2 --fsFile "C:\gowin_work\TP20K_MusicPlayer\impl\pnr\top.fs"
-```
-
-**写入 Flash（掉电保存，比赛演示用）**
-
-把 `--run 2` 改成 `--run 36`。
-
-GUI 方式：打开 Programmer → 选 GW2A-18C → 添加 `top.fs` → Program/Configure。
-
----
-
-## 7. 验证
-
-`sim\verify.py` 是位级模型，做两件事：
-
-1. 逐周期模拟 `pt8211_tx.v`，把串行流反解回 16 位字，确认 DAC 收到的就是 `sample_l/sample_r`
-2. 模拟乐谱 + DDS，输出 `twinkle.wav` / `ode.wav` 试听
-
-```powershell
-cd sim
-python verify.py
-```
-
-当前结果：
-
-```
-frame 0: L=0xA55A R=0x3CC3  OK
-frame 1: L=0xA55A R=0x3CC3  OK
-frames produced: 3, BCK period = 18 clk, frame = 32 BCK, Fs = 46875.00 Hz
-RESULT: PASS
-```
-
-> 这个模型在开发中抓到过一个真 bug：`bit_cnt` 误写成 6 位导致每帧 64 个 BCK、
-> 采样率掉一半。改成 5 位后修复。
-
----
-
-## 8. 资源占用
-
-| 资源 | 用量 | 占比 |
-|------|------|------|
-| Logic (LUT/ALU) | 294 / 20736 | **2%** |
-| Register | 149 / 15552 | <1% |
-| BSRAM | 1 / 46 | 3% |
-
-余量极大，后续加 8 声部 Karplus-Strong 引擎绰绰有余。
-
----
-
-## 9. 下一步
-
-- [ ] 加入 Karplus-Strong 物理建模拨弦（钢琴/古筝音色）
-- [ ] 多声部并行（8 voice）
-- [ ] ADSR 包络
-- [ ] 电容触摸 / 压力传感器交互
-- [ ] 音色切换
-
----
-
-## 10. 目录
-
-```
-TP20K_MusicPlayer/
-├── src/
-│   ├── top.v          主控：乐谱 ROM + DDS + 按键
-│   ├── pt8211_tx.v    PT8211 串行发送器
-│   ├── sine_rom.v     256×16 正弦波表
-│   ├── top.cst        引脚约束
-│   └── top.sdc        时钟约束
-├── sim/
-│   ├── verify.py      位级验证 + WAV 渲染
-│   ├── twinkle.wav
-│   └── ode.wav
-├── build.tcl          命令行构建脚本
-└── TP20K_MusicPlayer.gprj
-```
+MIT

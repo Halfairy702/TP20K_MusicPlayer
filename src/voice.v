@@ -12,6 +12,7 @@ module voice (
     input  wire [1:0]  bank,            // wavetable bank
     input  wire        trigger,         // 1-clk pulse
     input  wire        note_off,        // 1-clk pulse
+    output wire        busy,            // envelope is not idle
     output reg  signed [15:0] out
 );
 
@@ -38,7 +39,7 @@ module voice (
         .trigger     (trigger),
         .note_off    (note_off),
         .env         (env),
-        .active      ()
+        .active      (busy)
     );
 
     wavetable_rom u_rom (
